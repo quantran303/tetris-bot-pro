@@ -15,173 +15,171 @@ PIECES = {
     'L': [[[0,0,1],[1,1,1]],[[1,0],[1,0],[1,1]],[[1,1,1],[1,0,0]],[[1,1],[0,1],[0,1]]],
 }
 
+
 def new_board():
     return [[0]*BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
+
 
 def drop_piece(board, shape, x):
     h_shape = len(shape)
     w_shape = len(shape[0])
-    best_y = None
-    for y in range(BOARD_HEIGHT - h_shape + 1):
-        collision = False
-        for sy in range(h_shape):
-            for sx in range(w_shape):
-                if not shape[sy][sx]:
-                    continue
-                bx, by = x + sx, y + sy
-                if bx < 0 or bx >= BOARD_WIDTH or by >= BOARD_HEIGHT:
-                    collision = True
-                    break
-                if board[by][bx]:
-                    collision = True
-                    break
-            if collision:
-                break
-        if collision:
-            break
-        best_y = y
-    if best_y is None:
-        return None, 0
-    newb = copy.deepcopy(board)
-    for sy in range(h_shape):
-        for sx in range(w_shape):
-            if shape[sy][sx]:
-                newb[best_y + sy][x + sx] = 1
-    cleared = 0
-    rows_to_keep = []
-    for row in newb:
-        if all(row):
-            cleared += 1
-        else:
-            rows_to_keep.append(row)
-    while len(rows_to_keep) < BOARD_HEIGHT:
-        rows_to_keep.insert(0, [0]*BOARD_WIDTH)
-    return rows_to_keep, cleared
+    y = 0
+    while y + h_shape <= BOARD_HEIGHT:
+        for row in range(h_shape):
+            for col in range(w_shape):
+                if shape[row][col] and board[y + row][x + col]:
+                    return y - 1
+        y += 1
+    return y - 1
 
-def column_heights(board):
+
+def place_piece(board, shape, x, y):
+    """Dat piece vao board, tra ve board moi"""
+    new_b = copy.deepcopy(board)
+    for row in range(len(shape)):
+        for col in range(len(shape[0])):
+            if shape[row][col]:
+                if 0 <= y + row < BOARD_HEIGHT and 0 <= x + col < BOARD_WIDTH:
+                    new_b[y + row][x + col] = 1
+    return new_b
+
+
+def clear_lines(board):
+    """Xoa cac hang day, tra ve (board_moi, so_hang_xoa)"""
+    new_b = [row for row in board if not all(row)]
+    cleared = BOARD_HEIGHT - len(new_b)
+    new_b = [[0]*BOARD_WIDTH for _ in range(cleared)] + new_b
+    return new_b, cleared
+
+
+def get_column_heights(board):
     heights = []
-    for x in range(BOARD_WIDTH):
+    for col in range(BOARD_WIDTH):
         h = 0
-        for y in range(BOARD_HEIGHT):
-            if board[y][x]:
-                h = BOARD_HEIGHT - y
+        for row in range(BOARD_HEIGHT):
+            if board[row][col]:
+                h = BOARD_HEIGHT - row
                 break
         heights.append(h)
     return heights
 
-def max_height(heights):
-    return max(heights) if heights else 0
+
+def get_max_height(board):
+    """Tinh chieu cao thuc te: dem tu hang co block dau tien tu duoi len"""
+    for row in range(BOARD_HEIGHT):
+        if any(board[row]):
+            return BOARD_HEIGHT - row
+    return 0  # Board trong = chieu cao 0
+
 
 def count_holes(board):
     holes = 0
-    for x in range(BOARD_WIDTH):
-        found = False
-        for y in range(BOARD_HEIGHT):
-            if board[y][x]:
-                found = True
-            elif found:
+    for col in range(BOARD_WIDTH):
+        block_found = False
+        for row in range(BOARD_HEIGHT):
+            if board[row][col]:
+                block_found = True
+            elif block_found:
                 holes += 1
     return holes
 
-def bumpiness(heights):
-    return sum(abs(heights[i]-heights[i+1]) for i in range(len(heights)-1))
 
-def row_transitions(board):
-    total = 0
-    for row in board:
-        for i in range(len(row)-1):
-            if row[i] != row[i+1]:
-                total += 1
-    return total
+def count_bumpiness(heights):
+    return sum(abs(heights[i] - heights[i+1]) for i in range(len(heights)-1))
 
-def col_transitions(board):
-    total = 0
-    for x in range(BOARD_WIDTH):
-        for y in range(BOARD_HEIGHT-1):
-            if board[y][x] != board[y+1][x]:
-                total += 1
-    return total
 
-def near_full_row_bonus(board):
-    bonus = 0
-    for row in board:
-        filled = sum(row)
-        if filled >= 9:
-            bonus += 15
-        elif filled >= 8:
-            bonus += 8
-        elif filled >= 7:
-            bonus += 3
-    return bonus
+def count_complete_lines(board):
+    return sum(1 for row in board if all(row))
 
-def evaluate_board_pro(board, cleared):
-    heights = column_heights(board)
-    agg_h = sum(heights)
-    mh = max_height(heights)
+
+def evaluate_board(board, lines_cleared):
+    """
+    Ham danh gia board sau khi dat piece.
+    Diem cao = tot, diem thap = xau.
+    """
+    heights = get_column_heights(board)
+    max_h = get_max_height(board)
     holes = count_holes(board)
-    bump = bumpiness(heights)
-    rt = row_transitions(board)
-    ct = col_transitions(board)
-    clear_bonus = [0, 5, 18, 35, 60][min(cleared, 4)]
-    nf_bonus = near_full_row_bonus(board)
-    score = clear_bonus + nf_bonus
-    avg_h = agg_h / BOARD_WIDTH
-    height_dev = sum(abs(h - avg_h) for h in heights)
-    if mh <= 10:
-        score -= agg_h * 0.20
-        score -= height_dev * 0.70
-        score -= holes * 6.0
-        score -= bump * 0.30
-        score -= rt * 0.15
-        score -= ct * 0.15
-    else:
-        score -= agg_h * 1.0
-        score -= height_dev * 1.0
-        score -= holes * 12.0
-        score -= bump * 0.5
-        score -= rt * 0.3
-        score -= ct * 0.3
-    if mh >= MAX_HARD_HEIGHT:
-        score -= 2000
-    elif mh >= MAX_SAFE_HEIGHT:
-        score -= 600
+    bumpiness = count_bumpiness(heights)
+    avg_height = sum(heights) / BOARD_WIDTH
+
+    score = 0
+
+    # Thuong cho moi hang cleared
+    line_rewards = [0, 100, 300, 700, 1500]
+    score += line_rewards[min(lines_cleared, 4)]
+
+    # Phat neu board cao
+    if max_h > MAX_HARD_HEIGHT:
+        score -= (max_h - MAX_HARD_HEIGHT) * 500
+    elif max_h > MAX_SAFE_HEIGHT:
+        score -= (max_h - MAX_SAFE_HEIGHT) * 100
+
+    # Phat lo hong
+    score -= holes * 150
+
+    # Phat do gon song
+    score -= bumpiness * 30
+
+    # Phat chieu cao trung binh
+    score -= avg_height * 10
+
     return score
 
-def best_move_one(board, piece_type):
-    best_score, best = None, None
-    for r, shape in enumerate(PIECES.get(piece_type, [])):
-        w = len(shape[0])
-        for x in range(BOARD_WIDTH - w + 1):
-            newb, cleared = drop_piece(board, shape, x)
-            if newb is None:
-                continue
-            score = evaluate_board_pro(newb, cleared)
-            if best_score is None or score > best_score:
-                best_score = score
-                best = (r, x, newb, cleared, score)
-    return best
 
-def best_move_lookahead(board, current_piece, next_pieces=None, depth=2):
-    if not next_pieces or depth <= 1:
-        return best_move_one(board, current_piece)
-    best_first, best_total = None, None
-    for r, shape in enumerate(PIECES.get(current_piece, [])):
+def get_best_move(board, piece_type, next_piece=None):
+    """
+    Tim nuoc di tot nhat cho piece hien tai.
+    Tra ve (rotation, x, score) hoac None neu khong tim duoc.
+    """
+    if piece_type is None or piece_type not in PIECES:
+        return None
+
+    shapes = PIECES[piece_type]
+    best_score = float('-inf')
+    best_move = None
+
+    for rot_idx, shape in enumerate(shapes):
         w = len(shape[0])
         for x in range(BOARD_WIDTH - w + 1):
-            newb, cleared = drop_piece(board, shape, x)
-            if newb is None:
+            y = drop_piece(board, shape, x)
+            if y < 0:
                 continue
-            score = evaluate_board_pro(newb, cleared)
-            total = score
-            b2 = newb
-            for i, p in enumerate(next_pieces[:depth-1]):
-                mv = best_move_one(b2, p)
-                if mv is None:
-                    break
-                _, _, newb2, _, sc2 = mv
-                total += sc2 * (0.75 ** (i+1))
-                b2 = newb2
-            if best_total is None or total > best_total:
-                best_total = total
-                best_first = (r, x, newb, cleared, total)
-    return best_first
+            new_b = place_piece(board, shape, x, y)
+            new_b, cleared = clear_lines(new_b)
+
+            # Look-ahead: neu co next piece, tinh them 1 buoc
+            if next_piece and next_piece in PIECES:
+                next_shapes = PIECES[next_piece]
+                best_next = float('-inf')
+                for ns in next_shapes:
+                    nw = len(ns[0])
+                    for nx in range(BOARD_WIDTH - nw + 1):
+                        ny = drop_piece(new_b, ns, nx)
+                        if ny < 0:
+                            continue
+                        nb2 = place_piece(new_b, ns, nx, ny)
+                        nb2, c2 = clear_lines(nb2)
+                        s2 = evaluate_board(nb2, c2)
+                        if s2 > best_next:
+                            best_next = s2
+                score = evaluate_board(new_b, cleared) + 0.3 * best_next
+            else:
+                score = evaluate_board(new_b, cleared)
+
+            if score > best_score:
+                best_score = score
+                best_move = (rot_idx, x, score)
+
+    return best_move
+
+
+def matrix_to_board(matrix):
+    """
+    Chuyen matrix tu vision.py (True/False) sang board noi bo (1/0).
+    matrix[row][col] = True neu o do co block.
+    """
+    board = []
+    for row in matrix:
+        board.append([1 if cell else 0 for cell in row])
+    return board
