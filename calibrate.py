@@ -1,267 +1,230 @@
 """
-calibrate.py - Tu dong tim toa do board Tetr.io tren man hinh cua ban
+calibrate.py - Tu dong tim vung board Tetris tren man hinh
 
-CAH DUNG (QUAN TRONG - Chay truoc khi dung bot):
-  1. Mo Tetr.io trong Chrome, vao Zen mode
-  2. Dat cua so Chrome chiem toan man hinh (Maximize)
-  3. Mo terminal, cd den thu muc bot
-  4. Chay: python calibrate.py
-  5. Lam theo huong dan hien ra
-  6. File calibration.json se duoc tao ra
-  7. Sau do chay: python main.py
+CAch dung:
+  python calibrate.py
 
-YEU CAU: pip install mss numpy pyautogui
+Sau khi chay, file calibration.json se duoc tao ra voi toa do chinh xac
+cua board, next piece, va hold piece tren man hinh hien tai.
+
+Yeu cau: tetr.io dang mo tren Chrome, o trang thai dang choi (co pieces).
 """
-import mss
-import numpy as np
 import json
 import time
 import sys
+import numpy as np
+from mss import mss
 
-CALIB_FILE = "calibration.json"
+OUTPUT_FILE = 'calibration.json'
 
+# ---------------------------------------------------------------------------
+# Chup toan man hinh
+# ---------------------------------------------------------------------------
 
-def capture_full_screen():
-    with mss.mss() as sct:
-        monitor = sct.monitors[1]  # man hinh chinh
-        img = sct.grab(monitor)
-        arr = np.array(img, dtype=np.uint8)
-        return arr[:, :, :3], monitor  # BGR
+def grab_screen():
+    with mss() as sc:
+        monitor = sc.monitors[1]  # man hinh chinh
+        img = sc.grab(monitor)
+        return np.array(img)[:, :, :3], monitor
 
+# ---------------------------------------------------------------------------
+# Phat hien board Tetris bang cach tim cac duong doc thang hang
+# Board Tetris co ti le cao/rong ~ 2:1 va co khung vien
+# ---------------------------------------------------------------------------
 
-def find_board_by_color(img):
+def simplified_full(pixels):
+    """Loc pixel: loai bo qua toi va qua sang."""
+    b, g, r = pixels[:, :, 0], pixels[:, :, 1], pixels[:, :, 2]
+    dark  = ((b < 90) & (g < 70) & (r < 60)).astype(np.uint8)
+    white = ((b > 200) & (g > 200) & (r > 200)).astype(np.uint8)
+    excluded = np.clip(dark.astype(int) + white.astype(int), 0, 1).astype(np.uint8)
+    return (1 - excluded).astype(np.uint8)
+
+def find_board_auto(screen_img, monitor):
     """
-    Tim board Tetr.io bang cach:
-    - Board co vien mau xanh lam nhat hoac dam
-    - Khu vuc board phai co nen toi
-    - Ty le khung board la ~1:2 (rong:cao)
+    Tu dong tim board Tetris:
+    1. Tim vung co mat do piece cao nhat
+    2. Board phai co ti le ~1:2 (rong:cao)
+    Tra ve dict {top, left, width, height} hoac None
     """
-    # Chuyen sang HSV de tim vung co mau
-    h_all, w_all = img.shape[:2]
+    H, W = screen_img.shape[:2]
+    field = simplified_full(screen_img)
 
-    # Tim cot va hang co nhieu bien doi mau (vien board)
-    # Scan theo hang de tim vung toi (nen board)
-    gray = (img[:,:,0].astype(int) + img[:,:,1].astype(int) + img[:,:,2].astype(int)) // 3
+    # Chia man hinh thanh cac block 40x40, dem so pixel piece
+    block = 40
+    rows = H // block
+    cols = W // block
+    density = np.zeros((rows, cols))
+    for r in range(rows):
+        for c in range(cols):
+            density[r, c] = field[r*block:(r+1)*block, c*block:(c+1)*block].mean()
 
-    # Board Tetr.io co nen tuong doi toi (< 50 per channel average)
-    dark_mask = gray < 40
+    # Tim vung co density cao: board thuc su
+    threshold = 0.08
+    active = density > threshold
 
-    # Tim khoi lon nhat cua vung toi
-    # Dung sliding window theo chieu doc
-    best_col_start = 0
-    best_col_end = w_all
-    best_row_start = 0
-    best_row_end = h_all
+    # Tim bounding box cua vung active
+    rows_with_piece = np.where(active.any(axis=1))[0]
+    cols_with_piece = np.where(active.any(axis=0))[0]
 
-    # Thong ke vung toi theo cot
-    col_dark = np.sum(dark_mask, axis=0)  # tong pixel toi theo cot
-    row_dark = np.sum(dark_mask, axis=1)  # tong pixel toi theo hang
-
-    # Tim cot trung tam (cot co nhieu vung toi nhat)
-    center_col = int(np.argmax(
-        np.convolve(col_dark, np.ones(50, dtype=int), 'valid')
-    )) + 25
-
-    # Scan tu center ra ngoai de tim vien board
-    # Tim cot trai
-    left = center_col
-    while left > 0 and col_dark[left] > h_all * 0.3:
-        left -= 1
-    # Tim cot phai
-    right = center_col
-    while right < w_all - 1 and col_dark[right] > h_all * 0.3:
-        right += 1
-
-    # Tim hang tren
-    top = 0
-    while top < h_all - 1 and row_dark[top] < (right - left) * 0.3:
-        top += 1
-    # Tim hang duoi
-    bottom = h_all - 1
-    while bottom > 0 and row_dark[bottom] < (right - left) * 0.3:
-        bottom -= 1
-
-    # Kiem tra ti le hop le (board Tetris ~1:2)
-    bw = right - left
-    bh = bottom - top
-    if bw <= 0 or bh <= 0:
+    if len(rows_with_piece) < 5 or len(cols_with_piece) < 3:
         return None
 
-    ratio = bh / bw
-    if not (1.5 <= ratio <= 2.5):
-        # Adjust: dat ty le chuan 2:1
-        center_x = (left + right) // 2
-        center_y = (top + bottom) // 2
-        bw = min(bw, w_all // 4)
-        bh = int(bw * 2.0)
-        left = center_x - bw // 2
-        right = center_x + bw // 2
-        top = center_y - bh // 2
-        bottom = center_y + bh // 2
+    # Lay phan chinh giua (loai bo panel next/hold)
+    # Board namnchinhla o trung tam man hinh
+    mid_col = cols // 2
+    # Loc chi lay cac cot gan trung tam
+    center_cols = cols_with_piece[
+        (cols_with_piece >= mid_col - cols//4) &
+        (cols_with_piece <= mid_col + cols//4)
+    ]
+    if len(center_cols) < 3:
+        center_cols = cols_with_piece
+
+    r_min = int(rows_with_piece[0])
+    r_max = int(rows_with_piece[-1])
+    c_min = int(center_cols[0])
+    c_max = int(center_cols[-1])
+
+    # Convert sang pixel
+    px_top    = r_min * block
+    px_left   = c_min * block
+    px_height = (r_max - r_min + 1) * block
+    px_width  = (c_max - c_min + 1) * block
+
+    # Board Tetris phai co ti le ~1:2 (rong:cao)
+    ratio = px_height / px_width if px_width > 0 else 0
+    if ratio < 1.5 or ratio > 2.8:
+        # Thu dieu chinh width de co ti le dung
+        px_height_target = int(px_width * 2)
+        if px_height_target > px_height:
+            px_height = px_height_target
+
+    # Dam bao khong vuot qua man hinh
+    px_height = min(px_height, H - px_top)
+    px_width  = min(px_width, W - px_left)
+
+    # Offset cua monitor
+    board = {
+        'top':    px_top    + monitor['top'],
+        'left':   px_left   + monitor['left'],
+        'width':  px_width,
+        'height': px_height
+    }
+    return board
+
+def board_from_known_resolution(monitor, screen_w, screen_h):
+    """
+    Fallback: tinh toa do dua tren do phan giai man hinh.
+    Tetr.io chrome fullscreen co board o giua man hinh.
+    """
+    # Dua tren 1920x1080 fullscreen
+    # Board ~316x632 tai vi tri ~(483, 135)
+    scale_x = screen_w / 1920
+    scale_y = screen_h / 1080
+
+    board_w = int(316 * scale_x)
+    board_h = int(632 * scale_y)
+    board_l = int(483 * scale_x) + monitor['left']
+    board_t = int(135 * scale_y) + monitor['top']
 
     return {
-        "left": int(left),
-        "top": int(top),
-        "width": int(right - left),
-        "height": int(bottom - top),
+        'top': board_t, 'left': board_l,
+        'width': board_w, 'height': board_h
     }
 
-
-def manual_calibrate():
+def derive_panels(board, monitor, screen_w, screen_h):
     """
-    Calibrate thu cong bang cach click vao 2 goc board.
-    Su dung pyautogui de bat vi tri chuot.
+    Tu board, suy ra vi tri cac panel next va hold.
+    Next o ben phai board, hold o ben trai.
     """
-    try:
-        import pyautogui
-    except ImportError:
-        print("Loi: can pip install pyautogui")
-        return None
+    scale_x = screen_w / 1920
+    scale_y = screen_h / 1080
 
-    print()
-    print("=" * 55)
-    print("  CALIBRATE THU CONG")
-    print("=" * 55)
-    print()
-    print("Huong dan:")
-    print("  1. De cua so Tetr.io hien ra (KHONG minimize)")
-    print("  2. Di chuot den goc TREN-TRAI cua board (o dau tien)")
-    print("  3. Bam ENTER")
-    print()
-    input("  >>> Bam ENTER sau khi dat chuot vao goc TREN-TRAI board...")
-    x1, y1 = pyautogui.position()
-    print(f"  Goc tren-trai: ({x1}, {y1})")
-    print()
-    print("  4. Di chuot den goc DUOI-PHAI cua board (o cuoi cung)")
-    print("  5. Bam ENTER")
-    print()
-    input("  >>> Bam ENTER sau khi dat chuot vao goc DUOI-PHAI board...")
-    x2, y2 = pyautogui.position()
-    print(f"  Goc duoi-phai: ({x2}, {y2})")
-    print()
+    panel_w = int(108 * scale_x)
+    panel_h = int(80  * scale_y)
 
-    board_w = abs(x2 - x1)
-    board_h = abs(y2 - y1)
-    board_left = min(x1, x2)
-    board_top = min(y1, y2)
-
-    board = {
-        "left": int(board_left),
-        "top": int(board_top),
-        "width": int(board_w),
-        "height": int(board_h),
-    }
-
-    # Tinh toan cac vung khac dua tren board
-    cell_w = board_w / 10
-    cell_h = board_h / 20
-
-    # Hold piece: nam ben trai board, cach ~3 cell
+    # Hold: ben trai board
+    hold_left = board['left'] - int(130 * scale_x)
+    hold_left = max(0, hold_left)
     hold = {
-        "left": max(0, int(board_left - cell_w * 4)),
-        "top": int(board_top),
-        "width": int(cell_w * 3.5),
-        "height": int(cell_h * 3),
+        'top':   board['top'],
+        'left':  hold_left,
+        'width': panel_w,
+        'height': panel_h
     }
 
-    # Next pieces: nam ben phai board
-    next_regions = []
+    # Next: ben phai board
+    next_left = board['left'] + board['width'] + int(10 * scale_x)
+    nexts = []
     for i in range(3):
-        next_regions.append({
-            "left": int(board_left + board_w + cell_w * 0.5),
-            "top": int(board_top + i * cell_h * 3.5),
-            "width": int(cell_w * 3.5),
-            "height": int(cell_h * 3),
+        nexts.append({
+            'top':    board['top'] + i * int(90 * scale_y),
+            'left':   next_left,
+            'width':  panel_w,
+            'height': panel_h
         })
 
-    config = {
-        "board": board,
-        "hold": hold,
-        "next": next_regions,
-    }
+    return hold, nexts
 
-    return config
-
-
-def save_config(config):
-    with open(CALIB_FILE, "w") as f:
-        json.dump(config, f, indent=2)
-    print(f"  Luu cau hinh vao {CALIB_FILE} thanh cong!")
-
-
-def print_config(config):
-    print()
-    print("CAU HINH DA LUU:")
-    b = config["board"]
-    print(f"  Board: top={b['top']}, left={b['left']}, w={b['width']}, h={b['height']}")
-    h = config["hold"]
-    print(f"  Hold:  top={h['top']}, left={h['left']}, w={h['width']}, h={h['height']}")
-    for i, n in enumerate(config["next"]):
-        print(f"  Next{i+1}: top={n['top']}, left={n['left']}, w={n['width']}, h={n['height']}")
-    print()
-
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
+    print('=' * 50)
+    print('Tetris Bot - Calibration Tool')
+    print('=' * 50)
     print()
-    print("=" * 55)
-    print("  TETR.IO BOT - CALIBRATION TOOL")
-    print("=" * 55)
+    print('Huong dan:')
+    print('1. Mo tetr.io tren Chrome, F11 full screen')
+    print('2. Bat dau 1 game (can co pieces hien thi tren board)')
+    print('3. Nhan Enter khi san sang...')
+    input()
+
+    print('[CAL] Chup man hinh sau 3 giay...')
+    time.sleep(3)
+
+    screen_img, monitor = grab_screen()
+    H, W = screen_img.shape[:2]
+    print(f'[CAL] Man hinh: {W}x{H}')
+
+    # Thu tu dong phat hien board
+    print('[CAL] Dang tim board tu dong...')
+    board = find_board_auto(screen_img, monitor)
+
+    if board:
+        ratio = board['height'] / board['width'] if board['width'] else 0
+        print(f'[CAL] Tim thay board: {board} (ratio={ratio:.2f})')
+        if ratio < 1.5 or ratio > 2.8:
+            print('[CAL] Canh bao: Ti le board khong hop le, dung gia tri mac dinh')
+            board = None
+
+    if not board:
+        print('[CAL] Dung gia tri mac dinh theo do phan giai man hinh...')
+        board = board_from_known_resolution(monitor, W, H)
+        print(f'[CAL] Board mac dinh: {board}')
+
+    hold, nexts = derive_panels(board, monitor, W, H)
+
+    calib = {
+        'board': board,
+        'hold':  hold,
+        'next':  nexts,
+        'screen_size': [W, H]
+    }
+
+    with open(OUTPUT_FILE, 'w') as f:
+        json.dump(calib, f, indent=2)
+
     print()
-    print("Chon phuong phap calibrate:")
-    print("  1. Thu cong (KHUYEN DUNG - chinh xac nhat)")
-    print("  2. Tu dong (thu tim board tren man hinh)")
+    print(f'[CAL] Da luu calibration vao: {OUTPUT_FILE}')
+    print(f'[CAL] Board  : top={board["top"]} left={board["left"]} w={board["width"]} h={board["height"]}')
+    print(f'[CAL] Hold   : top={hold["top"]}  left={hold["left"]}  w={hold["width"]} h={hold["height"]}')
+    print(f'[CAL] Next[0]: top={nexts[0]["top"]} left={nexts[0]["left"]}')
     print()
+    print('[CAL] Kiem tra: chay python debug_vision.py de xem board co duoc nhan dien dung khong')
+    print('[CAL] Neu sai, sua tay file calibration.json')
 
-    choice = input("Nhap 1 hoac 2: ").strip()
-
-    if choice == "2":
-        print()
-        print("Dang chup man hinh va tim board...")
-        print("Hay chac rang Tetr.io dang hien thi toan man hinh!")
-        time.sleep(2)
-        img, monitor = capture_full_screen()
-        config_board = find_board_by_color(img)
-
-        if config_board is None:
-            print("Khong tim thay board tu dong. Chuyen sang thu cong...")
-            config = manual_calibrate()
-        else:
-            bw = config_board["width"]
-            bh = config_board["height"]
-            cell_w = bw / 10
-            cell_h = bh / 20
-            bl = config_board["left"]
-            bt = config_board["top"]
-
-            hold = {
-                "left": max(0, int(bl - cell_w * 4)),
-                "top": int(bt),
-                "width": int(cell_w * 3.5),
-                "height": int(cell_h * 3),
-            }
-            next_regions = []
-            for i in range(3):
-                next_regions.append({
-                    "left": int(bl + bw + cell_w * 0.5),
-                    "top": int(bt + i * cell_h * 3.5),
-                    "width": int(cell_w * 3.5),
-                    "height": int(cell_h * 3),
-                })
-            config = {"board": config_board, "hold": hold, "next": next_regions}
-            print("Tim thay board tu dong!")
-    else:
-        config = manual_calibrate()
-
-    if config is None:
-        print("Calibrate that bai!")
-        return
-
-    print_config(config)
-    save_config(config)
-
-    print("Calibrate xong! Bay gio chay: python main.py")
-    print()
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
