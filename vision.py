@@ -1,229 +1,250 @@
-import mss
-import numpy as np
+"""
+vision.py - Doc man hinh Tetris theo logic mikhail-vlasenko/Tetris-AI
+
+Cach hoat dong:
+1. Chup vung board tu man hinh
+2. Loc pixel: loai bo qua toi (nen) va qua sang (background)
+3. Chia grid 20x10, moi cell vote 9 diem => mean > 0.75 = co khoi
+4. Nhan dien mau piece bang colour distance
+"""
 import os
 import json
-import time
+import numpy as np
+from mss import mss
 
-BOARD_WIDTH  = 10
-BOARD_HEIGHT = 20
-CALIB_FILE   = "calibration.json"
+BOARD_W = 10
+BOARD_H = 20
+CALIB_FILE = 'calibration.json'
 
-# Default screen regions for 1920x1080 fullscreen Chrome
-# Run calibrate.py to auto-detect for your screen
-_DEFAULT = {
-    "board": {"top": 130, "left": 483, "width": 318, "height": 634},
-    "hold":  {"top": 130, "left": 335, "width": 115, "height": 115},
-    "next": [
-        {"top": 145, "left": 810, "width": 115, "height": 90},
-        {"top": 250, "left": 810, "width": 115, "height": 90},
-        {"top": 355, "left": 810, "width": 115, "height": 90},
-    ]
+# Tetr.io piece colours (RGB)
+# Thu tu: I, O, T, S, Z, J, L
+PIECE_COLORS_RGB = [
+    [49,  206, 209],  # I  - cyan
+    [218, 176,  26],  # O  - yellow
+    [175,  41, 138],  # T  - purple
+    [ 99, 178,  37],  # S  - green
+    [215,  15,  55],  # Z  - red
+    [ 24,  67, 212],  # J  - blue
+    [225, 133,  25],  # L  - orange
+]
+PIECE_NAMES = ['I', 'O', 'T', 'S', 'Z', 'J', 'L']
+
+# Nguong loc pixel (BGR)
+# Pixel qua toi hoac qua sang => khong phai piece
+DARK_BOUNDARY = [90, 70, 60]   # BGR lower bound - qua toi => background
+BRIGHT_BOUND  = 200             # Gia tri > nay o ca 3 kenh => qua sang
+
+# Default region cho 1920x1080 Chrome fullscreen
+_DEFAULT_CALIB = {
+    'board': {'top': 135, 'left': 483, 'width': 316, 'height': 632},
+    'next':  [{'top': 148, 'left': 810, 'width': 108, 'height': 80}],
+    'hold':  {'top': 148, 'left': 340, 'width': 108, 'height': 80},
 }
 
-# ---------------------------------------------------------------------------
-# Calibration helpers
-# ---------------------------------------------------------------------------
-
-def load_calib():
-    if os.path.exists(CALIB_FILE):
-        with open(CALIB_FILE) as f:
-            return json.load(f)
-    return _DEFAULT
-
-_CALIB = None
+_screen = mss()
+_calib  = None
 
 def get_calib():
-    global _CALIB
-    if _CALIB is None:
-        _CALIB = load_calib()
-    return _CALIB
+    global _calib
+    if _calib is None:
+        if os.path.exists(CALIB_FILE):
+            with open(CALIB_FILE) as f:
+                _calib = json.load(f)
+        else:
+            _calib = _DEFAULT_CALIB
+    return _calib
+
+def grab(region: dict) -> np.ndarray:
+    """Chup man hinh va tra ve mang numpy HxWx3 (BGR)."""
+    img = _screen.grab(region)
+    arr = np.array(img)[:, :, :3]  # BGRA -> BGR
+    return arr
 
 # ---------------------------------------------------------------------------
-# Screenshot helpers
+# Buoc 1: Simplified pixels (logic tu scan_field.py)
 # ---------------------------------------------------------------------------
 
-def grab_region(region):
-    """Capture screen region and return as numpy array (H x W x 3 BGR)."""
-    with mss.mss() as sct:
-        img = sct.grab(region)
-    return np.array(img)[:, :, :3]  # drop alpha
-
-# ---------------------------------------------------------------------------
-# Colour-based cell detection
-# ---------------------------------------------------------------------------
-
-# Tetr.io piece colours in BGR (approximate midpoints)
-# Threshold: if ANY channel difference from background is > COLOUR_THRESH,
-# the cell is considered filled.
-BG_SAMPLE_ROWS = 2   # top rows of the board are usually empty at game start
-COLOUR_THRESH  = 35  # minimum channel deviation from background
-
-def is_block_pixel(pixel_bgr, bg_bgr):
-    """Return True if pixel is significantly different from background."""
-    return int(np.max(np.abs(pixel_bgr.astype(int) - bg_bgr.astype(int)))) > COLOUR_THRESH
-
-def extract_board_matrix():
+def simplified(pixels: np.ndarray) -> np.ndarray:
     """
-    Capture the board region and return a 20x10 binary matrix.
-    1 = filled cell, 0 = empty cell.
+    Tao mang nhi phan HxW: 1=co piece, 0=rong.
+    Loai bo pixel qua toi (nen den) va qua sang (vien grid).
+    (Dich tu scan_field.simplified() cua mikhail-vlasenko)
     """
-    calib = get_calib()
-    region = calib['board']
-    img = grab_region(region)  # H x W x 3
+    b, g, r = pixels[:, :, 0], pixels[:, :, 1], pixels[:, :, 2]
 
-    H, W = img.shape[:2]
-    cell_h = H / BOARD_HEIGHT
-    cell_w = W / BOARD_WIDTH
+    # Too dark => background
+    dark = ((b < DARK_BOUNDARY[0]) & (g < DARK_BOUNDARY[1]) & (r < DARK_BOUNDARY[2])).astype(int)
 
-    # Estimate background colour from first empty rows
-    bg_samples = []
-    for r in range(BG_SAMPLE_ROWS):
-        for c in range(BOARD_WIDTH):
-            cy = int((r + 0.5) * cell_h)
-            cx = int((c + 0.5) * cell_w)
-            bg_samples.append(img[cy, cx, :3])
-    bg_bgr = np.median(bg_samples, axis=0).astype(np.uint8)
+    # Too bright => grid line / UI
+    white = ((b > BRIGHT_BOUND) & (g > BRIGHT_BOUND) & (r > BRIGHT_BOUND)).astype(int)
 
-    matrix = []
-    for r in range(BOARD_HEIGHT):
-        row = []
-        for c in range(BOARD_WIDTH):
-            cy = int((r + 0.5) * cell_h)
-            cx = int((c + 0.5) * cell_w)
-            pixel = img[cy, cx, :3]
-            row.append(1 if is_block_pixel(pixel, bg_bgr) else 0)
-        matrix.append(row)
-    return matrix
-
-def get_board_max_height(board):
-    """Return the maximum filled height (rows from bottom) of the board."""
-    for r in range(BOARD_HEIGHT):
-        if any(board[r]):
-            return BOARD_HEIGHT - r
-    return 0
-
-def get_column_heights(board):
-    heights = []
-    for c in range(BOARD_WIDTH):
-        h = 0
-        for r in range(BOARD_HEIGHT):
-            if board[r][c]:
-                h = BOARD_HEIGHT - r
-                break
-        heights.append(h)
-    return heights
+    excluded = dark + white
+    field = 1 - np.clip(excluded, 0, 1)
+    return field
 
 # ---------------------------------------------------------------------------
-# Piece colour signatures (BGR, approximate)
+# Buoc 2: Tao grid 20x10 bang vote 9 diem quanh tam cell
 # ---------------------------------------------------------------------------
 
-PIECE_COLOURS = {
-    'I': np.array([220, 220,  50]),  # cyan  (BGR)
-    'O': np.array([ 50, 220, 220]),  # yellow
-    'T': np.array([220,  50, 220]),  # purple
-    'S': np.array([ 50, 220,  50]),  # green
-    'Z': np.array([ 50,  50, 220]),  # red
-    'J': np.array([220, 100,  50]),  # blue
-    'L': np.array([ 50, 150, 220]),  # orange
-}
-
-def classify_colour(pixel_bgr):
-    """Return the piece letter whose colour is closest to pixel_bgr."""
-    pixel = pixel_bgr.astype(float)
-    best_piece = None
-    best_dist  = 1e9
-    for piece, colour in PIECE_COLOURS.items():
-        dist = float(np.linalg.norm(pixel - colour.astype(float)))
-        if dist < best_dist:
-            best_dist  = dist
-            best_piece = piece
-    return best_piece if best_dist < 120 else None
-
-def _dominant_piece_in_region(img):
-    """Return the piece type that appears most in a small preview image."""
-    H, W = img.shape[:2]
-    calib = get_calib()
-    board_region = calib['board']
-    # Sample background from board top-left corner
-    bg_img = grab_region(board_region)
-    bg_bgr = np.median(bg_img[:10, :10, :3].reshape(-1, 3), axis=0).astype(np.uint8)
-
-    votes = {}
-    for r in range(0, H, max(1, H // 6)):
-        for c in range(0, W, max(1, W // 6)):
-            px = img[r, c, :3]
-            if not is_block_pixel(px, bg_bgr):
-                continue
-            piece = classify_colour(px)
-            if piece:
-                votes[piece] = votes.get(piece, 0) + 1
-    if not votes:
-        return None
-    return max(votes, key=votes.get)
-
-# ---------------------------------------------------------------------------
-# Current piece detection (spawn zone = top 4 rows, columns 3-6)
-# ---------------------------------------------------------------------------
-
-def get_current_piece_smart():
+def pixels_to_grid(field_pixels: np.ndarray) -> np.ndarray:
     """
-    Detect the active falling piece by sampling the spawn zone at the top
-    of the board (rows 0-3, centre columns 3-6 in 0-indexed).
-    Returns piece letter or None.
+    Chia anh da loc thanh grid 20x10.
+    Moi cell vote 9 diem (3x3 offset quanh tam cell).
+    mean > 0.75 => co piece.
+    (Logic tu get_field() cua mikhail-vlasenko)
+    Returns: numpy array shape (20, 10) voi 0/1
     """
-    calib = get_calib()
-    board_r = calib['board']
-    img     = grab_region(board_r)
-    H, W    = img.shape[:2]
-    cell_h  = H / BOARD_HEIGHT
-    cell_w  = W / BOARD_WIDTH
+    H, W = field_pixels.shape
+    cell_size = W // BOARD_W
 
-    # Sample top 4 rows, columns 2-7
-    bg_img = img
-    bg_bgr = np.median(img[int(0.5*cell_h): int(1.5*cell_h),
-                            int(0.5*cell_w): int(2.5*cell_w), :3].reshape(-1, 3),
-                        axis=0).astype(np.uint8)
+    v_centers = np.array(
+        np.linspace(cell_size // 2, H + cell_size // 2, BOARD_H + 1)[:-1], int)
+    h_centers = np.array(
+        np.linspace(cell_size // 2, W + cell_size // 2, BOARD_W + 1)[:-1], int)
 
-    votes = {}
-    for row in range(4):
-        for col in range(2, 8):
-            cy = int((row + 0.5) * cell_h)
-            cx = int((col + 0.5) * cell_w)
-            px = img[cy, cx, :3]
-            if not is_block_pixel(px, bg_bgr):
-                continue
-            piece = classify_colour(px)
-            if piece:
-                votes[piece] = votes.get(piece, 0) + 1
+    # 3x3 offset quanh tam cell
+    step = max(1, cell_size // 3)
+    offsets = [(-step, -step), (-step, 0), (-step, step),
+               (0,    -step), (0,    0), (0,    step),
+               (step,  -step), (step,  0), (step,  step)]
 
-    if not votes:
-        return None
-    best = max(votes, key=votes.get)
-    return best if votes[best] >= 2 else None
+    grid = np.zeros((BOARD_H, BOARD_W), dtype=np.float32)
+    for i, v in enumerate(v_centers):
+        for j, h in enumerate(h_centers):
+            votes = []
+            for dv, dh in offsets:
+                rv = np.clip(v + dv, 0, H - 1)
+                rh = np.clip(h + dh, 0, W - 1)
+                votes.append(field_pixels[rv, rh])
+            grid[i, j] = 1 if np.mean(votes) > 0.75 else 0
+    return grid.astype(int)
 
 # ---------------------------------------------------------------------------
-# Next pieces detection
+# Buoc 3: Doc board chinh
 # ---------------------------------------------------------------------------
 
-def get_next_pieces():
-    """Return list of up to 3 next piece letters from the preview panel."""
+def get_board() -> np.ndarray:
+    """
+    Chup board va tra ve grid 20x10 (numpy int array).
+    Row 0 = tren cung, Row 19 = duoi cung.
+    """
     calib  = get_calib()
-    pieces = []
-    for region in calib.get('next', []):
-        img = grab_region(region)
-        p   = _dominant_piece_in_region(img)
-        if p:
-            pieces.append(p)
-    return pieces
+    pixels = grab(calib['board'])
+    simple = simplified(pixels)
+    grid   = pixels_to_grid(simple)
+    return grid
 
 # ---------------------------------------------------------------------------
-# Hold piece detection
+# Buoc 4: Nhan dien mau piece
 # ---------------------------------------------------------------------------
+
+def cmp_pixel(pixel_bgr, color_rgb):
+    """Tinh khoang cach mau giua pixel BGR va color RGB."""
+    return (abs(int(pixel_bgr[2]) - color_rgb[0]) +
+            abs(int(pixel_bgr[1]) - color_rgb[1]) +
+            abs(int(pixel_bgr[0]) - color_rgb[2]))
+
+def get_piece_from_region(region: dict):
+    """
+    Nhan dien piece trong vung anh (next/hold panel).
+    Lay mau pixel noi bat nhat, so sanh voi bang mau.
+    Returns: chu cai piece ('I','O','T','S','Z','J','L') hoac None
+    """
+    pixels = grab(region)
+    H, W   = pixels.shape[:2]
+    simple = simplified(pixels)
+
+    # Lay tat ca pixel duoc danh la piece
+    mask = simple > 0
+    if not np.any(mask):
+        return None
+
+    piece_pixels = pixels[mask]  # Mx3 BGR
+    if len(piece_pixels) == 0:
+        return None
+
+    # Lay mau trung binh cua tat ca pixel piece
+    avg_bgr = piece_pixels.mean(axis=0)
+
+    # Tim piece co mau gan nhat
+    best_idx  = -1
+    best_dist = 9999
+    for idx, color_rgb in enumerate(PIECE_COLORS_RGB):
+        d = cmp_pixel(avg_bgr, color_rgb)
+        if d < best_dist:
+            best_dist = d
+            best_idx  = idx
+
+    if best_dist > 100:
+        return None
+    return PIECE_NAMES[best_idx]
+
+def get_next_piece():
+    """Tra ve ten piece tiep theo (str) hoac None."""
+    calib = get_calib()
+    nexts = calib.get('next', [])
+    if not nexts:
+        return None
+    return get_piece_from_region(nexts[0])
 
 def get_hold_piece():
-    calib  = get_calib()
-    region = calib.get('hold')
-    if not region:
+    """Tra ve ten piece dang giu (str) hoac None."""
+    calib = get_calib()
+    hold  = calib.get('hold')
+    if not hold:
         return None
-    img = grab_region(region)
-    return _dominant_piece_in_region(img)
+    return get_piece_from_region(hold)
+
+# ---------------------------------------------------------------------------
+# Buoc 5: Nhan dien piece hien tai dang roi (spawn zone)
+# Logic: scan 4 hang dau cua board, vote piece noi bat nhat
+# ---------------------------------------------------------------------------
+
+def get_current_piece(board: np.ndarray = None):
+    """
+    Nhan dien piece hien tai bang cach lay anh vung spawn (4 hang dau, cot 2-7)
+    tu board thuc te tren man hinh, roi phan tich mau.
+    """
+    calib   = get_calib()
+    pixels  = grab(calib['board'])   # anh day du cua board
+    H, W    = pixels.shape[:2]
+    cell_h  = H // BOARD_H
+    cell_w  = W // BOARD_W
+
+    # Vung spawn: 4 hang dau, cot 2->7 (0-indexed)
+    top    = 0
+    bottom = 4 * cell_h
+    left   = 2 * cell_w
+    right  = 8 * cell_w
+    spawn_img = pixels[top:bottom, left:right]
+
+    return get_piece_from_region_img(spawn_img)
+
+def get_piece_from_region_img(img: np.ndarray):
+    """Nhan dien piece tu anh numpy (HxWx3 BGR)."""
+    simple = simplified(img)
+    mask   = simple > 0
+    if not np.any(mask):
+        return None
+    piece_pixels = img[mask]
+    if len(piece_pixels) < 4:
+        return None
+    avg_bgr = piece_pixels.mean(axis=0)
+    best_idx  = -1
+    best_dist = 9999
+    for idx, color_rgb in enumerate(PIECE_COLORS_RGB):
+        d = cmp_pixel(avg_bgr, color_rgb)
+        if d < best_dist:
+            best_dist = d
+            best_idx  = idx
+    if best_dist > 100:
+        return None
+    return PIECE_NAMES[best_idx]
+
+# ---------------------------------------------------------------------------
+# Utility: in board ra terminal (de debug)
+# ---------------------------------------------------------------------------
+
+def print_board(board: np.ndarray):
+    for row in board:
+        print(''.join(['#' if c else '.' for c in row]))
