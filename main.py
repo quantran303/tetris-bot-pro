@@ -1,110 +1,127 @@
+"""
+main.py - Vong lap chinh cua Tetris Bot
+
+Thuat toan hoat dong:
+1. Chup board => nhan dien cau truc hien tai (20x10 numpy array)
+2. Nhan dien piece dang roi (spawn zone)
+3. Nhan dien next piece
+4. Goi engine_ai.best_move() => (rotation, x_pos)
+5. Thuc hien lenh: xoay + di chuyen + hard drop
+6. Lap lai
+
+Mo phong y tuong cua mikhail-vlasenko/Tetris-AI nhung chay tren tetr.io
+"""
 import time
-import os
 import sys
-from engine_ai import best_move, matrix_to_board, PIECES, new_board
+import os
+import numpy as np
+
 from vision import (
-    extract_board_matrix,
-    get_current_piece_smart,
-    get_next_pieces,
-    get_board_max_height,
-    get_column_heights,
-    CALIB_FILE,
+    get_board, get_current_piece, get_next_piece,
+    print_board, CALIB_FILE, get_calib
 )
+from engine_ai import best_move, find_roofs
 from controller import exec_move, focus_game_window
 
-SPAWN_COL   = 4    # spawn column centre for tetr.io
-DELAY_MOVE  = 0.10 # seconds after executing a move
-DELAY_WAIT  = 0.18 # seconds waiting for new piece to appear
-DELAY_RETRY = 0.08 # seconds between retries detecting piece
-MAX_RETRY   = 15   # retries before giving up on piece detection
+# Cau hinh vong lap
+DELAY_AFTER_MOVE   = 0.12   # giay, cho piece ha xuong sau hard drop
+DELAY_WAIT_PIECE   = 0.15   # giay, cho piece moi xuat hien
+DELAY_RETRY        = 0.06   # giay, thu lai khi khong nhan dien duoc piece
+MAX_RETRY_PIECE    = 20     # so lan thu lai toi da
+SCARED_HEIGHT      = 13     # khi max_height > nay => 'scared mode'
+DEPTH2_CHOICES     = 5      # so vi tri hang dau xet lookahead
 
 def check_calibration():
+    """Kiem tra file calibration ton tai."""
     if not os.path.exists(CALIB_FILE):
-        print('[MAIN] Calibration file not found. Run calibrate.py first!')
+        print('[MAIN] CANH BAO: Khong tim thay calibration.json!')
+        print('[MAIN] Chay: python calibrate.py truoc khi chay bot.')
         sys.exit(1)
 
-def board_from_vision():
-    """Return a 20x10 binary board from screen, or None on failure."""
-    matrix = extract_board_matrix()
-    if matrix is None:
-        return None
-    return matrix_to_board(matrix)
+def is_scared(board: np.ndarray) -> bool:
+    """Kiem tra xem board co qua cao khong."""
+    _, max_h, _, _ = find_roofs(board)
+    return max_h >= SCARED_HEIGHT
+
+def wait_for_piece(max_retries=MAX_RETRY_PIECE) -> str:
+    """
+    Doi cho den khi nhan dien duoc piece dang roi.
+    Tra ve ten piece hoac None.
+    """
+    for i in range(max_retries):
+        piece = get_current_piece()
+        if piece:
+            return piece
+        time.sleep(DELAY_RETRY)
+    return None
 
 def run_bot():
-    check_calibration()
-    print('[MAIN] Bot starting. Focus the tetr.io window...')
-    time.sleep(2)
-    focus_game_window()
-    time.sleep(0.5)
+    print('[MAIN] =====================================')
+    print('[MAIN] Tetris Bot Pro - tetr.io')
+    print('[MAIN] Dua tren logic mikhail-vlasenko/Tetris-AI')
+    print('[MAIN] =====================================')
 
-    # Track back-to-back state
-    b2b          = False
-    last_cleared = 0
-    no_move_cnt  = 0
-    MAX_NO_MOVE  = 5
+    check_calibration()
+
+    focus_game_window()
+    time.sleep(0.3)
+
+    fail_count = 0
+    move_count = 0
 
     while True:
-        # --- 1. Detect board state ---
-        board = board_from_vision()
+        # ------- 1. Doc board tu man hinh -------
+        board = get_board()
         if board is None:
-            print('[MAIN] Could not read board, retrying...')
+            print('[MAIN] Khong doc duoc board, thu lai...')
             time.sleep(0.3)
             continue
 
-        # --- 2. Detect current piece ---
-        current_piece = None
-        for _ in range(MAX_RETRY):
-            current_piece = get_current_piece_smart()
-            if current_piece:
-                break
-            time.sleep(DELAY_RETRY)
+        scared = is_scared(board)
+        if scared:
+            print('[MAIN] [SCARED MODE] Board cao > 13!')
 
+        # ------- 2. Nhan dien piece dang roi -------
+        current_piece = wait_for_piece()
         if not current_piece:
-            print('[MAIN] No current piece detected, skipping...')
-            time.sleep(DELAY_WAIT)
+            print('[MAIN] Khong nhan dien duoc piece, bo qua...')
+            fail_count += 1
+            if fail_count >= 10:
+                print('[MAIN] Qua nhieu lan that bai, kiem tra calibration!')
+                print_board(board)
+                fail_count = 0
+            time.sleep(DELAY_WAIT_PIECE)
             continue
 
-        # --- 3. Detect next piece (for lookahead) ---
-        next_pieces = get_next_pieces()
-        next_piece  = next_pieces[0] if next_pieces else None
+        fail_count = 0
 
-        # --- 4. Compute best move ---
-        rot, col, score = best_move(board, current_piece, next_piece, b2b)
+        # ------- 3. Nhan dien next piece -------
+        next_piece = get_next_piece()
 
-        if score < -5000:
-            # No valid move found – board likely in bad state
-            no_move_cnt += 1
-            print(f'[MAIN] No valid move (score={score:.1f}), count={no_move_cnt}')
-            if no_move_cnt >= MAX_NO_MOVE:
-                print('[MAIN] Resetting board state detection...')
-                no_move_cnt = 0
-                time.sleep(0.5)
-            time.sleep(DELAY_WAIT)
+        # ------- 4. Tinh nuoc di tot nhat -------
+        result = best_move(
+            board, current_piece, next_piece,
+            depth2_choices=DEPTH2_CHOICES,
+            scared=scared
+        )
+
+        if result is None:
+            print(f'[MAIN] Piece={current_piece}: Khong tim duoc nuoc di hop le!')
+            time.sleep(DELAY_WAIT_PIECE)
             continue
 
-        no_move_cnt = 0
-        print(f'[MAIN] Piece={current_piece} Next={next_piece} Rot={rot} Col={col} Score={score:.2f} B2B={b2b}')
+        rotation, x_pos, score = result
+        move_count += 1
 
-        # --- 5. Execute move ---
-        exec_move(rot, col, current_piece)
-        time.sleep(DELAY_MOVE)
+        print(f'[MAIN] #{move_count} Piece={current_piece} Next={next_piece} '
+              f'Rot={rotation} Col={x_pos} Score={score:.1f} Scared={scared}')
 
-        # --- 6. Wait for piece to land and update B2B state ---
-        time.sleep(DELAY_WAIT)
-        new_board_state = board_from_vision()
-        if new_board_state is not None:
-            # Estimate lines cleared by counting full rows
-            cleared = sum(1 for row in new_board_state if all(c for c in row))
-            # Actually cleared = rows that disappeared; compare heights
-            old_h = sum(1 for row in board if any(c for c in row))
-            new_h = sum(1 for row in new_board_state if any(c for c in row))
-            lines_cleared = max(0, (old_h + 1) - new_h)  # rough estimate
+        # ------- 5. Thuc hien nuoc di -------
+        exec_move(rotation, x_pos, current_piece)
 
-            # Update B2B: maintain if Tetris (4) or kept from before
-            if lines_cleared == 4:
-                b2b = True
-            elif lines_cleared > 0:
-                b2b = False  # single/double/triple breaks B2B
+        # ------- 6. Cho piece ha xuong va piece moi xuat hien -------
+        time.sleep(DELAY_AFTER_MOVE)
+        time.sleep(DELAY_WAIT_PIECE)
 
 if __name__ == '__main__':
     run_bot()
