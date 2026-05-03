@@ -1,176 +1,232 @@
 import mss
 import numpy as np
+import os
+import json
 
 BOARD_WIDTH = 10
 BOARD_HEIGHT = 20
 
-# ============================================================
-# TOA DO VUNG MAN HINH - Tetr.io Zen mode
-# Neu bot khong nhan dien dung, chay test_color.py de lay so
-# ============================================================
-MONITOR_REGION = {
-    "top":    230,
-    "left":   548,
-    "width":  252,
-    "height": 443,
+# ===========================================================
+# FILE LUU CAU HINH - tu dong luu sau khi calibrate
+# ===========================================================
+CALIB_FILE = "calibration.json"
+
+# ===========================================================
+# TOA DO MAC DINH - Tetr.io Zen mode 1920x1080, scale 100%
+# Chay calibrate.py de tu dong tim toa do chinh xac
+# ===========================================================
+_DEFAULT_CONFIG = {
+    "board": {"top": 130, "left": 483, "width": 318, "height": 634},
+    "hold":  {"top": 155, "left": 335, "width": 110, "height": 100},
+    "next": [
+        {"top": 165, "left": 810, "width": 110, "height": 80},
+        {"top": 260, "left": 810, "width": 110, "height": 80},
+        {"top": 355, "left": 810, "width": 110, "height": 80},
+    ]
 }
 
-# Vung hien thi piece dang roi (hold/current piece preview area)
-CURRENT_REGION = {
-    "top":    188,
-    "left":   548,
-    "width":  252,
-    "height": 50,
+def _load_config():
+    if os.path.exists(CALIB_FILE):
+        try:
+            with open(CALIB_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return _DEFAULT_CONFIG
+
+_cfg = _load_config()
+MONITOR_REGION = _cfg["board"]
+HOLD_REGION    = _cfg["hold"]
+NEXT_REGIONS   = _cfg["next"]
+# alias cho compatibility
+CURRENT_REGION = HOLD_REGION
+
+# ===========================================================
+# MAU HSV CUA 7 PIECES TETR.IO
+# Dung HSV de khong bi anh huong boi do sang man hinh
+# H: 0-179, S: 0-255, V: 0-255
+# ===========================================================
+PIECE_HSV = {
+    #  name  H_min H_max  S_min  V_min
+    "I":  (85,  105, 150, 100),   # Cyan
+    "O":  (20,   35, 150, 150),   # Yellow
+    "T":  (130, 155, 100,  80),   # Purple/Magenta
+    "S":  (50,   80, 120, 100),   # Green
+    "Z":  (0,    10, 150,  80),   # Red (low hue)
+    "Z2": (170, 179, 150,  80),   # Red (high hue wrap)
+    "J":  (105, 130, 150,  80),   # Blue
+    "L":  (10,   20, 150, 100),   # Orange
 }
 
-# Vung 3 next pieces ben phai
-NEXT_REGIONS = [
-    {"top": 250, "left": 818, "width": 85, "height": 55},
-    {"top": 325, "left": 818, "width": 85, "height": 55},
-    {"top": 400, "left": 818, "width": 85, "height": 55},
-]
-
-# ============================================================
-# MAU RGB THUC TE CUA TETR.IO (lay bang test_color.py)
-# Format: (R, G, B)  <-- chot la RGB de de doc
-# ============================================================
-PIECE_COLORS_RGB = {
-    "I": (41,  204, 204),   # Cyan
-    "O": (218, 170, 0),    # Yellow
-    "T": (140, 40,  180),   # Purple
-    "S": (50,  200, 50),    # Green
-    "Z": (215, 40,  40),    # Red
-    "J": (30,  80,  210),   # Blue
-    "L": (220, 120, 20),    # Orange
-}
-
-# Nguong nhan dien block (do bao nhieu pixel sang/co mau)
-BRIGHTNESS_MIN = 60    # Tong R+G+B / 3 phai >= nay
-SATURATION_MIN = 45    # Max channel - Min channel phai >= nay
-COLOR_MATCH_THRESH = 100  # Khoang cach mau toi da de xem la khop
+# Nguong phat hien block tren board (saturation)
+SATURATION_THRESHOLD = 60  # pixel voi S > nay la block
+BLOCK_PIXEL_RATIO    = 0.25  # it nhat 25% pixel la block thi o do la block
 
 
 def capture_region(region):
-    """Chup vung man hinh, tra ve numpy array RGB"""
+    """Chup vung man hinh, tra ve numpy array BGR"""
     with mss.mss() as sct:
         img = sct.grab(region)
-        # mss tra ve BGRA, chuyen sang RGB
-        arr = np.array(img)
-        return arr[:, :, 2::-1]  # BGRA -> RGB
+        arr = np.array(img, dtype=np.uint8)
+        return arr[:, :, :3]  # BGRA -> BGR (bo alpha)
 
 
-def average_color_rgb(img):
-    """Tra ve mau trung binh (R, G, B) cua anh"""
-    r = float(np.mean(img[:, :, 0]))
-    g = float(np.mean(img[:, :, 1]))
-    b = float(np.mean(img[:, :, 2]))
-    return r, g, b
+def bgr_to_hsv_single(b, g, r):
+    """Chuyen 1 pixel BGR sang HSV (H:0-179, S:0-255, V:0-255)"""
+    b, g, r = b/255.0, g/255.0, r/255.0
+    v = max(b, g, r)
+    s_range = v - min(b, g, r)
+    if v == 0:
+        return 0, 0, 0
+    s = s_range / v
+    if s_range == 0:
+        h = 0
+    elif v == r:
+        h = (60 * ((g - b) / s_range)) % 360
+    elif v == g:
+        h = 60 * ((b - r) / s_range) + 120
+    else:
+        h = 60 * ((r - g) / s_range) + 240
+    if h < 0:
+        h += 360
+    return int(h / 2), int(s * 255), int(v * 255)  # scale H to 0-179
 
 
-def is_colored_block(r, g, b):
+def img_to_hsv(bgr_img):
+    """Chuyen anh BGR sang HSV bang numpy"""
+    try:
+        import cv2
+        return cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
+    except ImportError:
+        pass
+    # Fallback: chuyen tung pixel
+    h_img = np.zeros_like(bgr_img)
+    for y in range(bgr_img.shape[0]):
+        for x in range(bgr_img.shape[1]):
+            b, g, r = bgr_img[y, x]
+            h_img[y, x] = bgr_to_hsv_single(int(b), int(g), int(r))
+    return h_img
+
+
+def classify_piece_from_hsv(hsv_img):
     """
-    Kiem tra mau co phai la block Tetris hay khong.
-    Block Tetris luon co mau sac noi bat (cao saturation)
-    va do sang trung binh tro len.
+    Xac dinh loai piece tu anh HSV.
+    Tim mau chiem nhieu pixel nhat.
     """
-    brightness = (r + g + b) / 3.0
-    if brightness < BRIGHTNESS_MIN:
-        return False
-    max_c = max(r, g, b)
-    min_c = min(r, g, b)
-    saturation = max_c - min_c
-    return saturation >= SATURATION_MIN
+    h = hsv_img[:, :, 0].astype(float)
+    s = hsv_img[:, :, 1].astype(float)
+    v = hsv_img[:, :, 2].astype(float)
 
-
-def color_distance(r1, g1, b1, r2, g2, b2):
-    """Khoang cach Euclidean giua 2 mau RGB"""
-    return ((r1-r2)**2 + (g1-g2)**2 + (b1-b2)**2) ** 0.5
-
-
-def identify_piece_rgb(r, g, b):
-    """
-    Xac dinh loai piece tu mau RGB.
-    Tra ve ten piece ('I','O','T','S','Z','J','L') hoac None.
-    """
-    if not is_colored_block(r, g, b):
+    # Chi xet pixel co mau (S cao, V cao)
+    mask_colored = (s > 80) & (v > 60)
+    if np.sum(mask_colored) < 5:
         return None
 
-    best_piece = None
-    best_dist = float('inf')
-    for piece, (pr, pg, pb) in PIECE_COLORS_RGB.items():
-        dist = color_distance(r, g, b, pr, pg, pb)
-        if dist < best_dist:
-            best_dist = dist
-            best_piece = piece
+    h_colored = h[mask_colored]
 
-    if best_dist > COLOR_MATCH_THRESH:
+    best_piece = None
+    best_count = 0
+
+    for piece, params in PIECE_HSV.items():
+        h_min, h_max, s_min, v_min = params
+        name = piece.rstrip("2")
+        mask_piece = (s > s_min) & (v > v_min)
+        if h_min <= h_max:
+            mask_piece &= (h >= h_min) & (h <= h_max)
+        else:  # wrap-around (Red)
+            mask_piece &= (h >= h_min) | (h <= h_max)
+        count = int(np.sum(mask_piece))
+        if count > best_count:
+            best_count = count
+            best_piece = name
+
+    total_pixels = bgr_img_area(hsv_img)
+    if best_count < max(3, total_pixels * 0.05):
         return None
     return best_piece
 
 
-def get_current_piece():
-    """Lay piece hien tai dang roi"""
-    img = capture_region(CURRENT_REGION)
-    # Lay vung trung tam tranh vien
+def bgr_img_area(img):
+    return img.shape[0] * img.shape[1]
+
+
+def get_piece_from_region(region):
+    """Lay piece tu mot vung man hinh"""
+    img = capture_region(region)
+    # Cat vien ngoai 15%
     h, w = img.shape[:2]
-    cy1, cy2 = int(h*0.2), int(h*0.8)
-    cx1, cx2 = int(w*0.1), int(w*0.9)
-    center = img[cy1:cy2, cx1:cx2]
-    r, g, b = average_color_rgb(center)
-    return identify_piece_rgb(r, g, b)
+    img = img[int(h*0.15):int(h*0.85), int(w*0.1):int(w*0.9)]
+    if img.size == 0:
+        return None
+    hsv = img_to_hsv(img)
+    return classify_piece_from_hsv(hsv)
+
+
+def get_current_piece():
+    """Lay piece hien tai tu HOLD_REGION"""
+    # Thu HOLD truoc
+    piece = get_piece_from_region(HOLD_REGION)
+    if piece:
+        return piece
+    # Fallback: doc tu hang dau board (piece dang roi luon o hang 0-3)
+    return get_piece_from_board_top()
+
+
+def get_piece_from_board_top():
+    """
+    Fallback: xac dinh piece dang roi bang cach quet
+    3 hang dau board va lay mau chiem nhieu nhat.
+    """
+    img = capture_region(MONITOR_REGION)
+    h, w = img.shape[:2]
+    # Lay 20% dau cua board (hang 0-3)
+    top_region = img[0:int(h*0.2), :]
+    if top_region.size == 0:
+        return None
+    hsv = img_to_hsv(top_region)
+    return classify_piece_from_hsv(hsv)
 
 
 def get_next_pieces():
-    """Lay danh sach next pieces (3 pieces)"""
-    pieces = []
-    for region in NEXT_REGIONS:
-        img = capture_region(region)
-        h, w = img.shape[:2]
-        cy1, cy2 = int(h*0.15), int(h*0.85)
-        cx1, cx2 = int(w*0.1), int(w*0.9)
-        center = img[cy1:cy2, cx1:cx2]
-        r, g, b = average_color_rgb(center)
-        piece = identify_piece_rgb(r, g, b)
-        pieces.append(piece)
-    return pieces
+    """Lay danh sach 3 next pieces"""
+    return [get_piece_from_region(r) for r in NEXT_REGIONS]
 
 
 def extract_board_matrix():
     """
-    Chup board va chia thanh luoi 10x20.
-    Tra ve matrix 20x10: True = o co block, False = o trong.
-    Dung phuong phap phan tich saturation tung o.
+    Quet board 10x20.
+    Dung saturation: pixel S > threshold la block.
+    Tra ve matrix[row][col]: True=block, False=trong.
     """
     img = capture_region(MONITOR_REGION)
-    h, w = img.shape[:2]
-    cell_h = h / BOARD_HEIGHT
-    cell_w = w / BOARD_WIDTH
+    hsv = img_to_hsv(img)
+    h_img, w_img = hsv.shape[:2]
+    cell_h = h_img / BOARD_HEIGHT
+    cell_w = w_img / BOARD_WIDTH
 
     matrix = []
     for row in range(BOARD_HEIGHT):
         row_data = []
         for col in range(BOARD_WIDTH):
-            # Lay vung 60% trung tam cua o (tranh vien luoi)
             y1 = int(row * cell_h + cell_h * 0.2)
             y2 = int(row * cell_h + cell_h * 0.8)
             x1 = int(col * cell_w + cell_w * 0.2)
             x2 = int(col * cell_w + cell_w * 0.8)
-            cell = img[y1:y2, x1:x2]
+            cell = hsv[y1:y2, x1:x2]
             if cell.size == 0:
                 row_data.append(False)
                 continue
-            r, g, b = average_color_rgb(cell)
-            row_data.append(is_colored_block(r, g, b))
+            s_vals = cell[:, :, 1].astype(float)
+            v_vals = cell[:, :, 2].astype(float)
+            colored = np.sum((s_vals > SATURATION_THRESHOLD) & (v_vals > 50))
+            total = cell.shape[0] * cell.shape[1]
+            row_data.append(colored / max(total, 1) >= BLOCK_PIXEL_RATIO)
         matrix.append(row_data)
     return matrix
 
 
 def get_board_max_height(matrix):
-    """
-    Tinh chieu cao thuc te cua board.
-    Tra ve so hang co block tinh tu duoi len.
-    Neu board trong hoan toan, tra ve 0.
-    """
+    """Tra ve chieu cao thuc te (0 neu trong)"""
     for row in range(BOARD_HEIGHT):
         if any(matrix[row]):
             return BOARD_HEIGHT - row
@@ -178,7 +234,7 @@ def get_board_max_height(matrix):
 
 
 def get_column_heights(matrix):
-    """Tra ve chieu cao tung cot (list 10 phan tu)"""
+    """Tra ve chieu cao tung cot"""
     heights = []
     for col in range(BOARD_WIDTH):
         height = 0
@@ -190,32 +246,17 @@ def get_column_heights(matrix):
     return heights
 
 
-def debug_colors():
-    """
-    Ham debug: in mau RGB thuc te cua CURRENT_REGION va NEXT_REGIONS.
-    Chay ham nay khi dang co piece de xem mau thuc te.
-    """
-    print("=" * 50)
-    print("DEBUG MAU SAC THUC TE TREN MAN HINH")
-    print("=" * 50)
+def average_color_rgb(img):
+    """Compat: Tra ve (R,G,B) trung binh (BGR input)"""
+    b = float(np.mean(img[:, :, 0]))
+    g = float(np.mean(img[:, :, 1]))
+    r = float(np.mean(img[:, :, 2]))
+    return r, g, b
 
-    img = capture_region(CURRENT_REGION)
-    h, w = img.shape[:2]
-    center = img[int(h*0.2):int(h*0.8), int(w*0.1):int(w*0.9)]
-    r, g, b = average_color_rgb(center)
-    piece = identify_piece_rgb(r, g, b)
-    print(f"CURRENT: R={r:.0f}, G={g:.0f}, B={b:.0f}  -> {piece}")
 
-    for i, region in enumerate(NEXT_REGIONS):
-        img = capture_region(region)
-        h, w = img.shape[:2]
-        center = img[int(h*0.15):int(h*0.85), int(w*0.1):int(w*0.9)]
-        r, g, b = average_color_rgb(center)
-        piece = identify_piece_rgb(r, g, b)
-        print(f"NEXT {i+1}: R={r:.0f}, G={g:.0f}, B={b:.0f}  -> {piece}")
-
-    print("=" * 50)
-    print("MAU THAM CHIEU (PIECE_COLORS_RGB):")
-    for name, (pr, pg, pb) in PIECE_COLORS_RGB.items():
-        print(f"  {name}: R={pr}, G={pg}, B={pb}")
-    print("=" * 50)
+def is_colored_block(r, g, b):
+    """Compat: kiem tra block theo RGB"""
+    brightness = (r + g + b) / 3.0
+    if brightness < 60:
+        return False
+    return (max(r, g, b) - min(r, g, b)) >= 45
