@@ -17,93 +17,143 @@ CURRENT_REGION = {
     "top":    188,
     "left":   548,
     "width":  252,
-    "height": 60,
+    "height": 50,
 }
 
 NEXT_REGIONS = [
-    {"top": 210, "left": 812, "width": 108, "height": 72},
-    {"top": 285, "left": 812, "width": 108, "height": 72},
-    {"top": 360, "left": 812, "width": 108, "height": 72},
-    {"top": 435, "left": 812, "width": 108, "height": 72},
-    {"top": 510, "left": 812, "width": 108, "height": 72},
+    {"top": 245, "left": 820, "width": 80, "height": 60},
+    {"top": 320, "left": 820, "width": 80, "height": 60},
+    {"top": 395, "left": 820, "width": 80, "height": 60},
 ]
 
-# Mau BGR thuc te tu Tetr.io
-# Neu detect sai, chay test_color.py de lay gia tri thuc roi cap nhat vao day
+# Mau BGR cua 7 khoi Tetris tren Tetr.io
 PIECE_COLORS = {
-    'I': (80,  220, 220),
-    'J': (210,  80,  60),
-    'L': (50,  150, 230),
-    'O': (50,  210, 220),
-    'S': (80,  210,  80),
-    'T': (190,  80, 200),
-    'Z': (70,   70, 210),
+    "I": (200, 200, 20),   # Cyan
+    "O": (20, 200, 200),   # Yellow
+    "T": (150, 20, 150),   # Purple
+    "S": (20, 180, 20),    # Green
+    "Z": (20, 20, 200),    # Red
+    "J": (200, 100, 20),   # Blue
+    "L": (20, 100, 200),   # Orange
 }
+
+COLOR_THRESHOLD = 60   # nguong phan biet block vs nen
+BRIGHTNESS_THRESHOLD = 80  # min do sang de tinh la block
+
 
 def capture_region(region):
     with mss.mss() as sct:
-        frame = np.array(sct.grab(region))
-    return frame[:, :, :3]
+        img = sct.grab(region)
+        return np.array(img)[:, :, :3]  # BGR, bo alpha
 
-def is_block(pixel):
-    b, g, r = int(pixel[0]), int(pixel[1]), int(pixel[2])
-    return (b + g + r) / 3 > 45
 
 def average_color(img):
-    h, w, _ = img.shape
-    mh = max(1, h // 4)
-    mw = max(1, w // 4)
-    center = img[mh:h-mh, mw:w-mw]
-    if center.size == 0:
-        return 0.0, 0.0, 0.0
-    return (
-        float(center[:, :, 0].mean()),
-        float(center[:, :, 1].mean()),
-        float(center[:, :, 2].mean()),
-    )
+    """Tra ve mau trung binh (B, G, R) cua anh"""
+    b = float(np.mean(img[:, :, 0]))
+    g = float(np.mean(img[:, :, 1]))
+    r = float(np.mean(img[:, :, 2]))
+    return b, g, r
 
-def nearest_piece(b, g, r):
-    best, best_dist = None, None
-    for name, (cb, cg, cr) in PIECE_COLORS.items():
-        d = (b - cb)**2 + (g - cg)**2 + (r - cr)**2
-        if best_dist is None or d < best_dist:
-            best_dist, best = d, name
-    return best
+
+def is_block(b, g, r):
+    """
+    Kiem tra xem mau co phai la block hay khong.
+    - Do sang phai > BRIGHTNESS_THRESHOLD
+    - It nhat 1 kenh mau phai vuot troi (color saturation)
+    """
+    brightness = (b + g + r) / 3.0
+    if brightness < BRIGHTNESS_THRESHOLD:
+        return False
+    max_ch = max(b, g, r)
+    min_ch = min(b, g, r)
+    saturation = max_ch - min_ch
+    return saturation > COLOR_THRESHOLD
+
 
 def extract_board_matrix():
+    """
+    Chup board va chia thanh luoi 10x20.
+    Tra ve matrix 20x10 voi True = o trong, False = o co block.
+    Chi dem la block neu ca 2 dieu kien (brightness + saturation) deu dat.
+    """
     img = capture_region(MONITOR_REGION)
-    h, w, _ = img.shape
+    h, w = img.shape[:2]
     cell_h = h / BOARD_HEIGHT
     cell_w = w / BOARD_WIDTH
-    board = [[0] * BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
-    for y in range(BOARD_HEIGHT):
-        for x in range(BOARD_WIDTH):
-            cy = min(int((y + 0.5) * cell_h), h - 1)
-            cx = min(int((x + 0.5) * cell_w), w - 1)
-            board[y][x] = 1 if is_block(img[cy, cx]) else 0
-    return board
 
-def detect_current_piece():
+    matrix = []
+    for row in range(BOARD_HEIGHT):
+        row_data = []
+        for col in range(BOARD_WIDTH):
+            # Lay vung trung tam cua o (tranh vien)
+            y1 = int(row * cell_h + cell_h * 0.2)
+            y2 = int(row * cell_h + cell_h * 0.8)
+            x1 = int(col * cell_w + cell_w * 0.2)
+            x2 = int(col * cell_w + cell_w * 0.8)
+            cell = img[y1:y2, x1:x2]
+            if cell.size == 0:
+                row_data.append(False)
+                continue
+            b, g, r = average_color(cell)
+            row_data.append(is_block(b, g, r))
+        matrix.append(row_data)
+    return matrix
+
+
+def identify_piece_from_color(b, g, r):
+    """Xac dinh loai piece tu mau BGR"""
+    if not is_block(b, g, r):
+        return None
+    best_piece = None
+    best_dist = float('inf')
+    for piece, (pb, pg, pr) in PIECE_COLORS.items():
+        dist = ((b - pb)**2 + (g - pg)**2 + (r - pr)**2) ** 0.5
+        if dist < best_dist:
+            best_dist = dist
+            best_piece = piece
+    if best_dist > 120:
+        return None
+    return best_piece
+
+
+def get_current_piece():
+    """Lay piece hien tai tu vung CURRENT_REGION"""
     img = capture_region(CURRENT_REGION)
     b, g, r = average_color(img)
-    if (b + g + r) / 3 < 35:
-        return None
-    return nearest_piece(b, g, r)
+    return identify_piece_from_color(b, g, r)
 
-def detect_next_piece(index=0):
-    if index >= len(NEXT_REGIONS):
-        return None
-    img = capture_region(NEXT_REGIONS[index])
-    b, g, r = average_color(img)
-    if (b + g + r) / 3 < 35:
-        return None
-    return nearest_piece(b, g, r)
 
-def detect_next_queue(count=5):
-    return [detect_next_piece(i) for i in range(count)]
+def get_next_pieces():
+    """Lay danh sach next pieces"""
+    pieces = []
+    for region in NEXT_REGIONS:
+        img = capture_region(region)
+        b, g, r = average_color(img)
+        piece = identify_piece_from_color(b, g, r)
+        pieces.append(piece)
+    return pieces
 
-def get_board_max_height(board):
-    for row_idx in range(BOARD_HEIGHT):
-        if any(board[row_idx]):
-            return BOARD_HEIGHT - row_idx
+
+def get_board_max_height(matrix):
+    """
+    Tinh chieu cao thuc te cua board dua tren matrix.
+    Tra ve so hang tinh tu duoi len co chua block.
+    Neu board trong hoan toan, tra ve 0.
+    """
+    for row in range(BOARD_HEIGHT):
+        if any(matrix[row]):
+            return BOARD_HEIGHT - row
     return 0
+
+
+def get_column_heights(matrix):
+    """Tra ve chieu cao cua tung cot (10 cot)"""
+    heights = []
+    for col in range(BOARD_WIDTH):
+        height = 0
+        for row in range(BOARD_HEIGHT):
+            if matrix[row][col]:
+                height = BOARD_HEIGHT - row
+                break
+        heights.append(height)
+    return heights
