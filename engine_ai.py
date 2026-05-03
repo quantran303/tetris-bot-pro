@@ -1,267 +1,331 @@
+"""
+engine_ai.py - AI logic dua tren mikhail-vlasenko/Tetris-AI
+
+Kien truc:
+1. PIECES: mang numpy 4x4 cua 7 tetromino x 4 rotation (giong figures.py)
+2. check_collision: kiem tra va cham
+3. land: simulate piece roi xuong
+4. all_landings: tra ve tat ca vi tri co the dat piece
+5. get_score: ham diem so dua tren:
+   - blank_cnt (lo rong bi che): phat nang nhat
+   - max_height: phat khi cao
+   - count_cleared: thuong manh khi >= 4 (Tetris)
+   - almost_full_line: thuong khi gan day hang
+   - find_hole: phat khi co gieng sau
+6. best_move: depth-2 lookahead
+"""
 import copy
+import numpy as np
 
-BOARD_WIDTH  = 10
-BOARD_HEIGHT = 20
-
-# 7 standard tetrominoes – each rotation is a list of rows (0/1)
-PIECES = {
-    'I': [
-        [[1,1,1,1]],
-        [[1],[1],[1],[1]],
-    ],
-    'O': [
-        [[1,1],[1,1]],
-    ],
-    'T': [
-        [[0,1,0],[1,1,1]],
-        [[1,0],[1,1],[1,0]],
-        [[1,1,1],[0,1,0]],
-        [[0,1],[1,1],[0,1]],
-    ],
-    'S': [
-        [[0,1,1],[1,1,0]],
-        [[1,0],[1,1],[0,1]],
-    ],
-    'Z': [
-        [[1,1,0],[0,1,1]],
-        [[0,1],[1,1],[1,0]],
-    ],
-    'J': [
-        [[1,0,0],[1,1,1]],
-        [[1,1],[1,0],[1,0]],
-        [[1,1,1],[0,0,1]],
-        [[0,1],[0,1],[1,1]],
-    ],
-    'L': [
-        [[0,0,1],[1,1,1]],
-        [[1,0],[1,0],[1,1]],
-        [[1,1,1],[1,0,0]],
-        [[1,1],[0,1],[0,1]],
-    ],
-}
+BOARD_W = 10
+BOARD_H = 20
 
 # ---------------------------------------------------------------------------
-# Board helpers
+# PIECES: 7 tetromino, moi cai co 4 rotations, mang 4x4
+# Thu tu: I=0, O=1, T=2, S=3, Z=4, J=5, L=6
+# Giong figures.py cua mikhail-vlasenko
 # ---------------------------------------------------------------------------
 
-def matrix_to_board(matrix):
-    """Convert vision matrix (list of lists with 0/1) to a flat board
-    represented as a list of rows from top to bottom."""
-    return [list(row) for row in matrix]
+PIECES = np.array([
+    # I (idx=0) - 4x4
+    [
+        [[1,1,1,1],[0,0,0,0],[0,0,0,0],[0,0,1,0]],
+        [[0,0,1,0],[0,0,1,0],[0,0,1,0],[0,0,1,0]],
+        [[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],
+        [[0,1,0,0],[0,1,0,0],[0,1,0,0],[0,1,0,0]],
+    ],
+    # O (idx=1)
+    [
+        [[0,1,1,0],[0,1,1,0],[0,0,0,0],[0,0,0,0]],
+        [[0,1,1,0],[0,1,1,0],[0,0,0,0],[0,0,0,0]],
+        [[0,1,1,0],[0,1,1,0],[0,0,0,0],[0,0,0,0]],
+        [[0,1,1,0],[0,1,1,0],[0,0,0,0],[0,0,0,0]],
+    ],
+    # T (idx=2)
+    [
+        [[0,1,0,0],[1,1,1,0],[0,0,0,0],[0,0,0,0]],
+        [[0,1,0,0],[0,1,1,0],[0,1,0,0],[0,0,0,0]],
+        [[0,0,0,0],[1,1,1,0],[0,1,0,0],[0,0,0,0]],
+        [[0,1,0,0],[1,1,0,0],[0,1,0,0],[0,0,0,0]],
+    ],
+    # S (idx=3)
+    [
+        [[0,1,1,0],[1,1,0,0],[0,0,0,0],[0,0,0,0]],
+        [[0,1,0,0],[0,1,1,0],[0,0,1,0],[0,0,0,0]],
+        [[0,0,0,0],[0,1,1,0],[1,1,0,0],[0,0,0,0]],
+        [[1,0,0,0],[1,1,0,0],[0,1,0,0],[0,0,0,0]],
+    ],
+    # Z (idx=4)
+    [
+        [[1,1,0,0],[0,1,1,0],[0,0,0,0],[0,0,0,0]],
+        [[0,0,1,0],[0,1,1,0],[0,1,0,0],[0,0,0,0]],
+        [[0,0,0,0],[1,1,0,0],[0,1,1,0],[0,0,0,0]],
+        [[0,1,0,0],[1,1,0,0],[1,0,0,0],[0,0,0,0]],
+    ],
+    # J (idx=5)
+    [
+        [[1,0,0,0],[1,1,1,0],[0,0,0,0],[0,0,0,0]],
+        [[0,1,1,0],[0,1,0,0],[0,1,0,0],[0,0,0,0]],
+        [[0,0,0,0],[1,1,1,0],[0,0,1,0],[0,0,0,0]],
+        [[0,1,0,0],[0,1,0,0],[1,1,0,0],[0,0,0,0]],
+    ],
+    # L (idx=6)
+    [
+        [[0,0,1,0],[1,1,1,0],[0,0,0,0],[0,0,0,0]],
+        [[0,1,0,0],[0,1,0,0],[0,1,1,0],[0,0,0,0]],
+        [[0,0,0,0],[1,1,1,0],[1,0,0,0],[0,0,0,0]],
+        [[1,1,0,0],[0,1,0,0],[0,1,0,0],[0,0,0,0]],
+    ],
+], dtype=np.int32)
 
-def new_board():
-    return [[0]*BOARD_WIDTH for _ in range(BOARD_HEIGHT)]
+PIECE_NAMES = ['I', 'O', 'T', 'S', 'Z', 'J', 'L']
+NAME_TO_IDX = {n: i for i, n in enumerate(PIECE_NAMES)}
 
-def can_place(board, piece_matrix, row, col):
-    for r, line in enumerate(piece_matrix):
-        for c, cell in enumerate(line):
-            if cell:
-                nr, nc = row + r, col + c
-                if nr < 0 or nr >= BOARD_HEIGHT or nc < 0 or nc >= BOARD_WIDTH:
-                    return False
-                if board[nr][nc]:
-                    return False
-    return True
-
-def drop_y(board, piece_matrix, col):
-    """Return the lowest valid row for hard-drop."""
-    row = 0
-    while row + 1 <= BOARD_HEIGHT and can_place(board, piece_matrix, row, col):
-        row += 1
-    row -= 1
-    return row if row >= 0 else None
-
-def place_piece(board, piece_matrix, row, col):
-    b = copy.deepcopy(board)
-    for r, line in enumerate(piece_matrix):
-        for c, cell in enumerate(line):
-            if cell:
-                b[row + r][col + c] = 1
-    return b
-
-def clear_lines(board):
-    new_b = [row for row in board if any(c == 0 for c in row)]
-    cleared = BOARD_HEIGHT - len(new_b)
-    new_b = [[0]*BOARD_WIDTH]*cleared + new_b
-    return new_b, cleared
+def piece_name_to_idx(name: str) -> int:
+    return NAME_TO_IDX.get(name, -1)
 
 # ---------------------------------------------------------------------------
-# Board analysis helpers
+# Collision & Landing (dich tu find_landings.py)
 # ---------------------------------------------------------------------------
 
-def col_heights(board):
-    heights = []
-    for c in range(BOARD_WIDTH):
-        h = 0
-        for r in range(BOARD_HEIGHT):
-            if board[r][c]:
-                h = BOARD_HEIGHT - r
-                break
-        heights.append(h)
-    return heights
+def check_collision(field: np.ndarray, piece: np.ndarray, pos_row: int, pos_col: int, piece_idx: int) -> bool:
+    """
+    Kiem tra va cham piece tai vi tri (pos_row, pos_col).
+    I-piece dung 4x4, con lai 3x3.
+    """
+    r = 4 if piece_idx == 0 else 3
+    for i in range(r):
+        for j in range(r):
+            if piece[i][j]:
+                ni, nj = i + pos_row, j + pos_col
+                if ni < 0 or ni >= BOARD_H or nj < 0 or nj >= BOARD_W:
+                    return True
+                if field[ni][nj]:
+                    return True
+    return False
 
-def count_holes(board, heights):
-    holes = 0
-    for c in range(BOARD_WIDTH):
-        top_row = BOARD_HEIGHT - heights[c]
-        for r in range(top_row + 1, BOARD_HEIGHT):
-            if board[r][c] == 0:
-                holes += 1
-    return holes
+def land(field: np.ndarray, piece: np.ndarray, x_pos: int, piece_idx: int):
+    """
+    Simulate piece roi tu tren xuong tai cot x_pos.
+    Tra ve board moi sau khi dat piece, hoac None neu khong hop le.
+    (Dich tu find_landings.land())
+    """
+    f = field.copy()
+    pos_row = 0
+    while not check_collision(f, piece, pos_row, x_pos, piece_idx):
+        pos_row += 1
+    if pos_row == 0:
+        return None  # Khong co cho cho piece
+    pos_row -= 1
+    # Dat piece vao board
+    r = 4 if piece_idx == 0 else 4
+    for i in range(4):
+        for j in range(4):
+            if piece[i][j]:
+                ni, nj = i + pos_row, j + x_pos
+                if 0 <= ni < BOARD_H and 0 <= nj < BOARD_W:
+                    f[ni][nj] = 1
+    return f
 
-def bumpiness(heights):
-    return sum(abs(heights[i] - heights[i+1]) for i in range(len(heights)-1))
+# ---------------------------------------------------------------------------
+# All landings
+# ---------------------------------------------------------------------------
 
-def count_complete_lines(board):
-    return sum(1 for row in board if all(c for c in row))
+def all_landings(field: np.ndarray, piece_idx: int):
+    """
+    Tinh tat ca vi tri co the dat piece_idx len board.
+    Tra ve list cua (result_field, rotation, x_pos).
+    (Dich tu find_landings.all_landings())
+    """
+    results = []
+    for rotation in range(4):
+        piece = PIECES[piece_idx][rotation]
+        for x_pos in range(-1, BOARD_W):
+            res = land(field, piece, x_pos, piece_idx)
+            if res is not None:
+                results.append((res, rotation, x_pos))
+    return results
 
-def well_depth(board, heights):
-    """Sum of well depths (columns that are much lower than neighbours).
-    A deep well on the left is desired for Tetris setups."""
-    total = 0
-    for c in range(BOARD_WIDTH):
-        left  = heights[c-1] if c > 0 else 100
-        right = heights[c+1] if c < BOARD_WIDTH-1 else 100
-        depth = min(left, right) - heights[c]
-        if depth > 0:
-            total += depth
-    return total
+# ---------------------------------------------------------------------------
+# Score function (dich tu AI_main.get_score())
+# ---------------------------------------------------------------------------
 
-def count_covered_cells(board, heights):
-    """Cells that are empty but have a filled cell above them (blockades)."""
-    blocked = 0
-    for c in range(BOARD_WIDTH):
-        top_row = BOARD_HEIGHT - heights[c]
-        found_block = False
-        for r in range(BOARD_HEIGHT):
-            if board[r][c] == 1:
-                found_block = True
-            elif found_block and board[r][c] == 0:
-                blocked += 1
-    return blocked
+def clear_lines(field: np.ndarray):
+    """
+    Xoa cac hang day va tra ve (field_moi, so_hang_da_xoa).
+    (Dich tu AI_main.clear_line())
+    """
+    f = field.copy()
+    full_cnt = 0
+    i = 0
+    while i < BOARD_H:
+        if np.sum(f[i]) == BOARD_W:
+            full_cnt += 1
+            f = np.delete(f, i, axis=0)
+            f = np.insert(f, 0, np.zeros(BOARD_W, dtype=np.int32), axis=0)
+        else:
+            i += 1
+    return f, full_cnt
 
-def detect_tspin_slot(board, heights):
-    """Reward positions that look like a T-spin setup:
-    a T-shaped cavity (3-wide indent with overhang on both sides)."""
-    score = 0
-    for c in range(1, BOARD_WIDTH - 1):
-        # Center column lower than both neighbours by 2+
-        left  = heights[c-1]
-        mid   = heights[c]
-        right = heights[c+1]
-        if left >= mid + 2 and right >= mid + 2:
-            score += 1  # potential T-spin Double setup
+def find_roofs(field: np.ndarray):
+    """
+    Tim o rong bi che phia duoi cac khoi da dat va cac thong tin lien quan.
+    Tra ve: (blank_cnt, max_height, column_heights, blank_cumulative_depth)
+    (Dich tu AI_main.find_roofs())
+    """
+    tops = np.zeros((BOARD_W, 2), dtype=float)
+    blank_cnt   = 0
+    blank_depth = 0
+    for i in range(BOARD_H):
+        for j in range(BOARD_W):
+            if field[i][j]:
+                if tops[j][0] == 0:
+                    tops[j][0] = BOARD_H - 1 - i  # chieu cao tinh tu duoi
+                tops[j][1] += 1
+            elif tops[j][0] != 0:
+                blank_cnt   += 1
+                blank_depth += tops[j][1] - 1
+    max_height   = int(np.max(tops[:, 0]))
+    col_heights  = tops[:, 0]
+    return blank_cnt, max_height, col_heights, blank_depth
+
+def almost_full_line(field: np.ndarray) -> float:
+    """
+    Thuong cho cac hang gan day (9/10 hoac 8/10 o da dien).
+    (Dich tu AI_main.almost_full_line())
+    """
+    score = 0.0
+    for i in range(BOARD_H):
+        s = int(np.sum(field[i]))
+        if s == BOARD_W - 1:
+            score += 2.0
+        elif s == BOARD_W - 2:
+            score += 0.5
     return score
 
-# ---------------------------------------------------------------------------
-# Scoring – pro-level weights
-# ---------------------------------------------------------------------------
-
-# Weights tuned toward tetr.io competitive play:
-# Priority: avoid holes > clear lines (Tetris >> singles) > low height > low bumpiness
-WEIGHTS = {
-    'lines_cleared_1': -0.5,   # single clear (ok but not great)
-    'lines_cleared_2': 2.0,    # double
-    'lines_cleared_3': 4.0,    # triple
-    'lines_cleared_4': 10.0,   # Tetris!  (reward strongly)
-    'holes':          -8.0,    # penalise holes heavily
-    'blockades':      -3.5,    # cells blocked above holes
-    'bumpiness':      -0.8,    # prefer flat surface
-    'max_height':     -1.5,    # penalise stacking high
-    'sum_heights':    -0.6,    # prefer overall low
-    'well_depth':      0.5,    # small reward for a well (Tetris prep)
-    'tspin_slot':      3.0,    # reward T-spin setups
-    'i_piece_bonus':   2.0,    # extra reward when I-piece clears 4 lines
-}
-
-def evaluate(board, lines_cleared, piece_type='?', b2b=False):
-    heights = col_heights(board)
-    holes   = count_holes(board, heights)
-    bumps   = bumpiness(heights)
-    maxh    = max(heights)
-    sumh    = sum(heights)
-    covered = count_covered_cells(board, heights)
-    well    = well_depth(board, heights)
-    tspin   = detect_tspin_slot(board, heights)
-
-    # Line clear reward table
-    lc_map = {0: 0, 1: WEIGHTS['lines_cleared_1'], 2: WEIGHTS['lines_cleared_2'],
-               3: WEIGHTS['lines_cleared_3'], 4: WEIGHTS['lines_cleared_4']}
-    lc_score = lc_map.get(lines_cleared, WEIGHTS['lines_cleared_4'])
-
-    # Back-to-back bonus (B2B Tetris / T-spin)
-    if b2b and lines_cleared >= 4:
-        lc_score *= 1.5
-
-    # Extra reward for I-piece Tetris
-    if piece_type == 'I' and lines_cleared == 4:
-        lc_score += WEIGHTS['i_piece_bonus']
-
-    score = (
-        lc_score
-        + holes   * WEIGHTS['holes']
-        + covered * WEIGHTS['blockades']
-        + bumps   * WEIGHTS['bumpiness']
-        + maxh    * WEIGHTS['max_height']
-        + sumh    * WEIGHTS['sum_heights']
-        + well    * WEIGHTS['well_depth']
-        + tspin   * WEIGHTS['tspin_slot']
-    )
-    return score
-
-# ---------------------------------------------------------------------------
-# Main search – best placement for one piece (with 1-piece lookahead)
-# ---------------------------------------------------------------------------
-
-def best_move(board, piece_type, next_piece_type=None, b2b=False):
+def find_hole(col_heights: np.ndarray) -> int:
     """
-    Returns (rotation_index, col, score).
-    Searches every rotation x column for `piece_type`.
-    If `next_piece_type` is given, adds a 1-piece lookahead.
+    Phat khi co cot qua thap so voi hang xom ("gieng").
+    (Dich tu AI_main.find_hole())
     """
-    rotations = PIECES.get(piece_type, [])
-    if not rotations:
-        return 0, BOARD_WIDTH // 2, -9999
+    cnt_hole = 0
+    prev_h   = 20
+    h        = col_heights.copy()
+    h[-1]    = 20  # cot cuoi khong tinh
+    for i in range(1, BOARD_W - 1):
+        if prev_h - 2 > h[i] and h[i] < h[i+1] - 2:
+            cnt_hole += 1
+            if prev_h - 4 > h[i] and h[i] < h[i+1] - 4:
+                cnt_hole += min(prev_h - 4 - h[i], h[i+1] - 4 - h[i])
+        prev_h = h[i]
+    return cnt_hole
 
-    best_score = None
+def get_score(field: np.ndarray, scared: bool = False) -> (float, bool):
+    """
+    Tra ve (diem_so, expect_tetris).
+    Logic hoan toan theo AI_main.get_score() cua mikhail-vlasenko.
+    """
+    expect_tetris = False
+    score         = 0.0
+
+    cleared_field, count_cleared = clear_lines(field)
+    blank_cnt, max_height, col_heights, blank_depth = find_roofs(cleared_field)
+
+    score += almost_full_line(cleared_field)
+
+    # Tetris (4 hang) rat tot
+    if count_cleared >= 4:
+        score += 1000
+        expect_tetris = True
+
+    # Mode scared (board cao > 13): uu tien clear hang hon het
+    if scared:
+        score += 10 * count_cleared
+        score -= max_height + max_height ** 1.4
+        return score, expect_tetris
+
+    # Mode binh thuong
+    score -= blank_cnt   * 10     # lo rong bi che: phat nang
+    score -= blank_depth * 2      # do sau lo: phat them
+
+    if max_height > 7:
+        score -= max_height ** 1.4
+
+    score -= find_hole(col_heights) * 10
+
+    if blank_cnt > 0:
+        score += 5 * count_cleared
+
+    # Khuyen khich xoa duoc hang
+    score -= 3 * count_cleared  # phat nhe viec xoa < 4 hang khi khong co lo
+
+    # Cot ngoai cung ben phai nen trong
+    if col_heights[-1] != 0:
+        score -= 10
+        score -= col_heights[-1]
+
+    return score, expect_tetris
+
+# ---------------------------------------------------------------------------
+# Best move: depth-1 va depth-2 (dich tu AI_main.calc_best/choose_action_depth2)
+# ---------------------------------------------------------------------------
+
+def best_move(board: np.ndarray, piece_name: str, next_piece_name: str = None,
+              depth2_choices: int = 5, scared: bool = False):
+    """
+    Tim nuoc di tot nhat cho piece hien tai.
+    Tra ve (rotation, x_pos, score) hoac None neu khong co nuoc.
+
+    - depth2_choices: so luong ung vien hang dau de xet lookahead
+    - scared: mode khi board qua cao
+    """
+    piece_idx = piece_name_to_idx(piece_name)
+    if piece_idx < 0:
+        return None
+
+    landings = all_landings(board, piece_idx)
+    if not landings:
+        return None
+
+    # Tinh score cho moi vi tri
+    scored = []
+    for (res_field, rot, x_pos) in landings:
+        s, exp_tet = get_score(res_field, scared)
+        scored.append((s, exp_tet, rot, x_pos, res_field))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    if not next_piece_name or depth2_choices <= 1:
+        best = scored[0]
+        return best[2], best[3], best[0]  # rotation, x_pos, score
+
+    # Depth-2 lookahead
+    next_idx  = piece_name_to_idx(next_piece_name)
+    top_n     = scored[:depth2_choices]
+    best_total = None
     best_rot   = 0
-    best_col   = 0
+    best_x     = 0
 
-    for rot_i, piece_matrix in enumerate(rotations):
-        pw = len(piece_matrix[0])
-        for x in range(BOARD_WIDTH - pw + 1):
-            y = drop_y(board, piece_matrix, x)
-            if y is None:
-                continue
-            placed = place_piece(board, piece_matrix, y, x)
-            placed, cleared = clear_lines(placed)
+    for (s, exp_tet, rot, x_pos, res_field) in top_n:
+        # Clear lines truoc khi tinh next piece
+        cleared, _ = clear_lines(res_field)
 
-            if next_piece_type and PIECES.get(next_piece_type):
-                # 1-piece lookahead: pick best next placement
-                next_best = None
-                for nrot, npm in enumerate(PIECES[next_piece_type]):
-                    npw = len(npm[0])
-                    for nx in range(BOARD_WIDTH - npw + 1):
-                        ny = drop_y(placed, npm, nx)
-                        if ny is None:
-                            continue
-                        nb = place_piece(placed, npm, ny, nx)
-                        nb, nc = clear_lines(nb)
-                        ns = evaluate(nb, nc, next_piece_type, b2b)
-                        if next_best is None or ns > next_best:
-                            next_best = ns
-                lookahead = next_best if next_best is not None else 0
+        if next_idx >= 0:
+            next_landings = all_landings(cleared, next_idx)
+            if next_landings:
+                next_scores = [get_score(nf, scared)[0] for (nf, nr, nx) in next_landings]
+                next_best   = max(next_scores)
             else:
-                lookahead = 0
+                next_best = -9999
+        else:
+            next_best = 0
 
-            base  = evaluate(placed, cleared, piece_type, b2b)
-            total = base + 0.5 * lookahead   # weight lookahead lower
+        # Tong diem: diem hien tai + diem tuong lai + bonus Tetris
+        total = s + next_best + (1000 if exp_tet else 0)
 
-            if best_score is None or total > best_score:
-                best_score = total
-                best_rot   = rot_i
-                best_col   = x
+        if best_total is None or total > best_total:
+            best_total = total
+            best_rot   = rot
+            best_x     = x_pos
 
-    if best_score is None:
-        return 0, BOARD_WIDTH // 2, -9999
-    return best_rot, best_col, best_score
+    return best_rot, best_x, best_total
